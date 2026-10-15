@@ -1,0 +1,230 @@
+# =========================================================
+# BACKEND: MOONRAKER (Klipper) via Home Assistant
+#
+# Uses entities from the Moonraker Home Assistant
+# integration. Thumbnails are fetched directly from
+# Moonraker, using the slicer-generated .thumbs/ PNG.
+#
+# Required substitutions (set in the device file):
+#   entity_prefix   e.g. "k2_plus" for sensor.k2_plus_progress
+#   moonraker_url   e.g. "http://192.168.1.50:7125"
+# =========================================================
+
+substitutions:
+
+  # Must match a thumbnail size your slicer generates.
+  thumb_size: "96x96"
+
+  # Override any of these if your entity names differ.
+  state_entity: sensor.${entity_prefix}_current_print_state
+  filename_entity: sensor.${entity_prefix}_filename
+  progress_entity: sensor.${entity_prefix}_progress
+  time_left_entity: sensor.${entity_prefix}_print_time_left
+  pause_entity: button.${entity_prefix}_pause_print
+  resume_entity: button.${entity_prefix}_resume_print
+  stop_entity: button.${entity_prefix}_cancel_print
+
+
+globals:
+
+  # True once a real print thumbnail URL has been set.
+  # Prevents fetching before Moonraker reports a filename.
+  - id: thumbnail_url_set
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+
+# =========================================================
+# ONLINE PRINT THUMBNAIL
+# =========================================================
+
+image:
+  - platform: online_image
+    id: thumbnail_image
+
+    # Placeholder only. Never downloaded: online_image does
+    # not fetch on its own (update_interval defaults to
+    # never), and the first fetch happens after set_url.
+    url: "${moonraker_url}/server/files/gcodes/"
+
+    format: PNG
+    type: RGB565
+
+    on_download_finished:
+      then:
+        - logger.log:
+            level: INFO
+            tag: thumbnail
+            format: "Thumbnail download succeeded"
+
+        - lambda: |-
+            id(thumbnail_ready) = true;
+
+        - lvgl.image.update:
+            id: thumbnail_widget
+            src: thumbnail_image
+
+        - if:
+            condition:
+              lambda: |-
+                const std::string &s = id(printer_state).state;
+                return s == "printing" || s == "paused";
+
+            then:
+              - lvgl.widget.show:
+                  id: thumbnail_widget
+
+    on_error:
+      then:
+        - logger.log:
+            level: ERROR
+            tag: thumbnail
+            format: "Thumbnail download FAILED"
+
+
+# =========================================================
+# HOME ASSISTANT TEXT SENSORS
+# =========================================================
+
+text_sensor:
+
+  # -------------------------------------------------------
+  # CURRENT PRINT STATE -> CANONICAL STATE
+  # -------------------------------------------------------
+
+  - platform: homeassistant
+    id: moonraker_print_state
+    entity_id: ${state_entity}
+
+    on_value:
+      then:
+
+        - text_sensor.template.publish:
+            id: printer_state
+            state: !lambda |-
+              if (x == "standby")
+                return std::string("ready");
+
+              if (x == "preparing" || x == "starting")
+                return std::string("preparing");
+
+              if (x.empty() || x == "unknown" || x == "unavailable")
+                return std::string("unknown");
+
+              // printing, paused, complete, cancelled, error
+              return x;
+
+        # Free the thumbnail buffer while not printing. If the
+        # same file is printed again the filename sensor does
+        # not change, so re-fetch the existing URL when a
+        # print becomes active without a ready thumbnail.
+
+        - if:
+            condition:
+              lambda: |-
+                return x == "printing" || x == "paused";
+
+            then:
+              - if:
+                  condition:
+                    lambda: |-
+                      return !id(thumbnail_ready) && id(thumbnail_url_set);
+
+                  then:
+                    - component.update: thumbnail_image
+
+            else:
+              - lambda: |-
+                  id(thumbnail_ready) = false;
+
+              - online_image.release:
+                  id: thumbnail_image
+
+
+  # -------------------------------------------------------
+  # CURRENT GCODE FILENAME -> THUMBNAIL URL
+  # -------------------------------------------------------
+
+  - platform: homeassistant
+    id: moonraker_filename
+    entity_id: ${filename_entity}
+
+    on_value:
+      then:
+
+        - if:
+            condition:
+              lambda: |-
+                return !x.empty() &&
+                       x != "unknown" &&
+                       x != "unavailable";
+
+            then:
+
+              # The previous image belongs to the old job.
+              - lambda: |-
+                  id(thumbnail_ready) = false;
+                  id(thumbnail_url_set) = true;
+
+              - lvgl.widget.hide:
+                  id: thumbnail_widget
+
+              - online_image.set_url:
+                  id: thumbnail_image
+
+                  url: !lambda |-
+                    std::string path = x;
+
+                    std::string dir = "";
+                    std::string file = path;
+
+                    size_t slash = path.rfind('/');
+
+                    if (slash != std::string::npos) {
+                      dir = path.substr(0, slash + 1);
+                      file = path.substr(slash + 1);
+                    }
+
+                    size_t ext = file.rfind(".gcode");
+
+                    if (ext != std::string::npos) {
+                      file.erase(ext);
+                    }
+
+                    return
+                      std::string("${moonraker_url}/server/files/gcodes/") +
+                      dir +
+                      ".thumbs/" +
+                      file +
+                      "-${thumb_size}.png";
+
+
+# =========================================================
+# HOME ASSISTANT NUMERIC SENSORS
+# =========================================================
+
+sensor:
+
+  - platform: homeassistant
+    id: moonraker_progress
+    entity_id: ${progress_entity}
+
+    on_value:
+      then:
+        - script.execute:
+            id: ui_set_progress
+            value: !lambda 'return x;'
+
+
+  # Moonraker integration reports this in hours.
+
+  - platform: homeassistant
+    id: moonraker_time_left
+    entity_id: ${time_left_entity}
+
+    on_value:
+      then:
+        - script.execute:
+            id: ui_set_time_left
+            minutes: !lambda 'return x * 60.0f;'

@@ -1,0 +1,54 @@
+# =========================================================
+# BASE
+#
+# Core ESPHome device settings shared by every display.
+#
+# Required substitutions (set in the device file):
+#   device_name, friendly_name
+#   api_encryption_key, wifi_ssid, wifi_password
+#
+# Secrets are passed in as substitutions so this file
+# works as a remote (github://) package. Set them from
+# !secret in the device file.
+# =========================================================
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+  # Start dim until Home Assistant reports the printer state.
+  on_boot:
+    priority: -100
+    then:
+      - light.turn_on:
+          id: backlight
+          brightness: 25%
+
+
+esp32:
+  board: nodemcu-32s
+  framework:
+    type: esp-idf
+
+
+logger:
+
+
+api:
+  encryption:
+    key: ${api_encryption_key}
+
+
+ota:
+  - platform: esphome
+
+
+http_request:
+  timeout: 10s
+
+
+# Intentionally no fallback AP / captive portal.
+
+wifi:
+  ssid: ${wifi_ssid}
+  password: ${wifi_password}

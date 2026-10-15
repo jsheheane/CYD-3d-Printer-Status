@@ -1,0 +1,36 @@
+# =========================================================
+# Snapmaker U1 status display
+#
+# Paste this into a new device in the ESPHome dashboard,
+# edit the substitutions below, and install. Everything
+# else is pulled from GitHub at the pinned release tag.
+# See README.md for where each value comes from.
+# =========================================================
+
+substitutions:
+  device_name: snapmaker-u1-display
+  friendly_name: Snapmaker U1 Display
+  printer_title: Snapmaker U1
+
+  # Prefix of this printer's Home Assistant entities.
+  # Example: sensor.snapmaker_u1_progress -> entity_prefix: snapmaker_u1
+  entity_prefix: snapmaker_u1
+
+  # Moonraker address. Give the printer a DHCP reservation
+  # so this never changes.
+  moonraker_url: http://192.168.1.50:7125
+
+  # Must match a PNG thumbnail size your slicer embeds.
+  # thumb_size: "96x96"
+
+  # Secrets live in your ESPHome secrets.yaml.
+  # Use a different API key for each display.
+  api_encryption_key: !secret snapmaker_u1_api_key
+  wifi_ssid: !secret wifi_ssid
+  wifi_password: !secret wifi_password
+
+packages:
+  base: github://jsheheane/CYD-3d-Printer-Status/packages/base.yaml@v1.0.0
+  hardware: github://jsheheane/CYD-3d-Printer-Status/packages/hardware/cyd-2432s028-9342.yaml@v1.0.0
+  ui: github://jsheheane/CYD-3d-Printer-Status/packages/ui.yaml@v1.0.0
+  backend: github://jsheheane/CYD-3d-Printer-Status/packages/backends/moonraker.yaml@v1.0.0

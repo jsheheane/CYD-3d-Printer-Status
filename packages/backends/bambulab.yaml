@@ -1,0 +1,332 @@
+# =========================================================
+# BACKEND: BAMBU LAB via ha-bambulab
+#
+# Required substitutions (set in the device file):
+#   entity_prefix   e.g. "p1s"
+#   ha_base_url     e.g. "http://192.168.1.10:8123"
+#
+# Thumbnail strategy:
+#
+#   ${cover_entity}
+#
+#   entity_picture:
+#       gives us the current HA image-proxy URL
+#
+#   image entity STATE:
+#       gives us the image revision timestamp
+#
+#   A change to the revision timestamp triggers
+#   downloading a fresh thumbnail.
+# =========================================================
+
+substitutions:
+
+  # Override any of these if your entity names differ.
+  status_entity: sensor.${entity_prefix}_print_status
+  error_entity: binary_sensor.${entity_prefix}_print_error
+  cover_entity: image.${entity_prefix}_cover_image
+  progress_entity: sensor.${entity_prefix}_print_progress
+  time_left_entity: sensor.${entity_prefix}_remaining_time
+  pause_entity: button.${entity_prefix}_pause_printing
+  resume_entity: button.${entity_prefix}_resume_printing
+  stop_entity: button.${entity_prefix}_stop_printing
+
+
+# =========================================================
+# ONLINE COVER IMAGE
+# =========================================================
+
+image:
+
+  - platform: online_image
+    id: thumbnail_image
+
+    url: "${ha_base_url}/api/image_proxy/${cover_entity}"
+
+    format: PNG
+    type: RGB565
+    resize: 96x96
+
+    update_interval: never
+
+    on_download_finished:
+      then:
+        - logger.log:
+            level: INFO
+            tag: thumbnail
+            format: "Fresh Bambu cover image downloaded"
+
+        - lambda: |-
+            id(thumbnail_ready) = true;
+
+        - lvgl.image.update:
+            id: thumbnail_widget
+            src: thumbnail_image
+
+        - if:
+            condition:
+              lambda: |-
+                const std::string &s = id(printer_state).state;
+                return s == "printing" || s == "paused";
+
+            then:
+              - lvgl.widget.show:
+                  id: thumbnail_widget
+
+    on_error:
+      then:
+        - logger.log:
+            level: ERROR
+            tag: thumbnail
+            format: "Bambu cover image download FAILED"
+
+
+# =========================================================
+# SCRIPTS
+# =========================================================
+
+script:
+
+  # -------------------------------------------------------
+  # BAMBU STATUS + ERROR -> CANONICAL STATE
+  #
+  # Bambu does not expose a persistent "cancelled" state.
+  # failed + print_error OFF is treated as cancelled.
+  # -------------------------------------------------------
+
+  - id: bambu_publish_state
+    mode: restart
+
+    then:
+      - text_sensor.template.publish:
+          id: printer_state
+          state: !lambda |-
+            const std::string &x = id(bambu_print_status).state;
+
+            if (x == "running")
+              return std::string("printing");
+
+            if (x == "pause")
+              return std::string("paused");
+
+            if (x == "finish")
+              return std::string("complete");
+
+            if (x == "prepare" || x == "init" || x == "slicing")
+              return std::string("preparing");
+
+            if (x == "failed") {
+
+              if (id(bambu_print_error).state)
+                return std::string("error");
+
+              return std::string("cancelled");
+            }
+
+            if (x == "idle")
+              return std::string("ready");
+
+            if (x == "offline")
+              return std::string("offline");
+
+            if (x.empty() || x == "unknown" || x == "unavailable")
+              return std::string("unknown");
+
+            return x;
+
+
+# =========================================================
+# HOME ASSISTANT TEXT SENSORS
+# =========================================================
+
+text_sensor:
+
+  # -------------------------------------------------------
+  # PRINT STATUS
+  # -------------------------------------------------------
+
+  - platform: homeassistant
+    id: bambu_print_status
+    entity_id: ${status_entity}
+
+    on_value:
+      then:
+
+        # New job preparation. The existing thumbnail belongs
+        # to the old job. Clear it as soon as a new job starts
+        # preparing.
+
+        - if:
+            condition:
+              lambda: |-
+                return
+                  x == "prepare" ||
+                  x == "init" ||
+                  x == "slicing";
+
+            then:
+              - logger.log:
+                  level: INFO
+                  tag: thumbnail
+                  format: "New Bambu job preparing - clearing old cover"
+
+              - lambda: |-
+                  id(thumbnail_ready) = false;
+
+              - lvgl.widget.hide:
+                  id: thumbnail_widget
+
+              - online_image.release: thumbnail_image
+
+        - script.execute: bambu_publish_state
+
+
+  # -------------------------------------------------------
+  # COVER IMAGE PROXY URL
+  #
+  # This tells us WHERE the current HA image is. It is not
+  # the refresh trigger because the proxy URL may remain
+  # unchanged between print jobs.
+  # -------------------------------------------------------
+
+  - platform: homeassistant
+    id: bambu_cover_picture
+    entity_id: ${cover_entity}
+    attribute: entity_picture
+
+
+  # -------------------------------------------------------
+  # COVER IMAGE REVISION
+  #
+  # The state of the HA image entity changes when a new
+  # image is published. This is the authoritative
+  # "new image arrived" trigger.
+  # -------------------------------------------------------
+
+  - platform: homeassistant
+    id: bambu_cover_state
+    entity_id: ${cover_entity}
+
+    on_value:
+      then:
+
+        - logger.log:
+            level: INFO
+            tag: thumbnail
+            format: "Bambu cover image revision changed"
+
+        - if:
+            condition:
+              lambda: |-
+                return
+                  !x.empty() &&
+                  x != "unknown" &&
+                  x != "unavailable";
+
+            then:
+
+              # Give Home Assistant time to finish updating
+              # entity_picture and the corresponding image.
+              - delay: 1s
+
+              - if:
+                  condition:
+                    lambda: |-
+                      const std::string &picture =
+                        id(bambu_cover_picture).state;
+
+                      return
+                        !picture.empty() &&
+                        picture != "unknown" &&
+                        picture != "unavailable";
+
+                  then:
+
+                    # The previous image is no longer valid.
+                    - lambda: |-
+                        id(thumbnail_ready) = false;
+
+                    - lvgl.widget.hide:
+                        id: thumbnail_widget
+
+                    # entity_picture can keep the same HA proxy
+                    # path even when the image bytes change.
+                    # Append the revision timestamp as a
+                    # cache-busting query parameter.
+                    - online_image.set_url:
+                        id: thumbnail_image
+
+                        url: !lambda |-
+                          std::string path =
+                            id(bambu_cover_picture).state;
+
+                          std::string url;
+
+                          // Absolute URL already supplied.
+                          if (
+                            path.rfind("http://", 0) == 0 ||
+                            path.rfind("https://", 0) == 0
+                          ) {
+                            url = path;
+                          }
+
+                          // Normal HA relative entity_picture URL.
+                          else {
+                            url = std::string("${ha_base_url}") + path;
+                          }
+
+                          if (url.find('?') == std::string::npos)
+                            url += "?state=";
+                          else
+                            url += "&state=";
+
+                          url += id(bambu_cover_state).state;
+
+                          return url;
+
+
+# =========================================================
+# HOME ASSISTANT BINARY SENSORS
+# =========================================================
+
+binary_sensor:
+
+  # Distinguishes a genuine print error from an aborted /
+  # cancelled job.
+  - platform: homeassistant
+    id: bambu_print_error
+    entity_id: ${error_entity}
+
+    on_state:
+      then:
+        - script.execute: bambu_publish_state
+
+
+# =========================================================
+# HOME ASSISTANT NUMERIC SENSORS
+# =========================================================
+
+sensor:
+
+  - platform: homeassistant
+    id: bambu_print_progress
+    entity_id: ${progress_entity}
+
+    on_value:
+      then:
+        - script.execute:
+            id: ui_set_progress
+            value: !lambda 'return x;'
+
+
+  # ha-bambulab reports this in minutes.
+
+  - platform: homeassistant
+    id: bambu_remaining_time
+    entity_id: ${time_left_entity}
+
+    on_value:
+      then:
+        - script.execute:
+            id: ui_set_time_left
+            minutes: !lambda 'return x;'

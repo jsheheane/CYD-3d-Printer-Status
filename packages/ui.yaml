@@ -1,0 +1,1156 @@
+# =========================================================
+# UI
+#
+# Fonts, local state, backlight policy, LVGL pages.
+#
+# Everything here is driven by the canonical printer model.
+# A backend package feeds it:
+#
+#   printer_state      text_sensor.template.publish with one of:
+#                      printing, paused, preparing, complete,
+#                      cancelled, error, ready, offline, unknown
+#                      (any other string is shown as-is)
+#
+#   ui_set_progress    script, parameter value: 0-100
+#   ui_set_time_left   script, parameter minutes
+#
+#   thumbnail_image    online_image id
+#   thumbnail_ready    set true once the current job's image
+#                      has downloaded, false when it is stale
+#
+#   ${pause_entity}, ${resume_entity}, ${stop_entity}
+#                      HA button entities
+#
+# Required substitutions (set in the device file):
+#   printer_title
+# =========================================================
+
+
+font:
+
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 14
+
+  - file: "gfonts://Roboto"
+    id: font_medium
+    size: 20
+
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 28
+
+
+# =========================================================
+# LOCAL STATE
+# =========================================================
+
+globals:
+
+  # The printer may keep reporting "complete" after the
+  # finished object has physically been removed. This lets
+  # the user acknowledge that removal locally.
+  - id: print_removed_acknowledged
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
+  # Tracks whether printer state, rather than a temporary
+  # touch wake, requires the backlight to remain at 100%.
+  - id: printer_backlight_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Prevents restarting the six-hour hold for the same job
+  # when Home Assistant republishes a finished state.
+  # Resets when a new print becomes active.
+  - id: post_print_hold_latched
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Thumbnail stays hidden until the current job's image
+  # has successfully downloaded. Set by the backend.
+  - id: thumbnail_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+
+# =========================================================
+# CANONICAL PRINTER STATE
+# =========================================================
+
+text_sensor:
+
+  - platform: template
+    id: printer_state
+    update_interval: never
+
+    on_value:
+      then:
+        - script.execute: update_printer_ui
+
+
+# =========================================================
+# TOUCH WAKE
+#
+# Any touch wakes an inactive display to 100%.
+# Repeated touches restart the 15-minute wake timer.
+# =========================================================
+
+touchscreen:
+
+  - id: !extend cyd_touch
+
+    on_touch:
+      then:
+        - light.turn_on:
+            id: backlight
+            brightness: 100%
+
+        - if:
+            condition:
+              lambda: |-
+                return !id(printer_backlight_active);
+
+            then:
+              - script.execute: touch_wake_timeout
+
+
+# =========================================================
+# SCRIPTS
+# =========================================================
+
+script:
+
+  # -------------------------------------------------------
+  # CANCELLED -> READY
+  #
+  # Printers can remain in a cancelled state indefinitely.
+  # After 30 minutes, locally display Printer Ready.
+  # -------------------------------------------------------
+
+  - id: cancelled_status_timeout
+    mode: restart
+
+    then:
+      - delay: 30min
+
+      - if:
+          condition:
+            lambda: |-
+              return id(printer_state).state == "cancelled";
+
+          then:
+            - lvgl.label.update:
+                id: printer_state_label
+                text: "Printer Ready"
+                text_color: 0x00D000
+
+
+  # -------------------------------------------------------
+  # CONTROL PAGE INACTIVITY TIMEOUT
+  # -------------------------------------------------------
+
+  - id: control_page_timeout
+    mode: restart
+
+    then:
+      - delay: 2min
+
+      - lvgl.page.show:
+          id: main_page
+          animation: MOVE_RIGHT
+          time: 200ms
+
+
+  # -------------------------------------------------------
+  # RETURN AFTER CONTROL ACTION
+  # -------------------------------------------------------
+
+  - id: control_action_return
+    mode: restart
+
+    then:
+      - script.stop: control_page_timeout
+
+      - delay: 1s
+
+      - lvgl.page.show:
+          id: main_page
+          animation: MOVE_RIGHT
+          time: 200ms
+
+
+  # -------------------------------------------------------
+  # TOUCH WAKE TIMEOUT
+  #
+  # Used only while the printer is otherwise inactive.
+  # Every touch restarts this 15-minute sliding timeout.
+  # -------------------------------------------------------
+
+  - id: touch_wake_timeout
+    mode: restart
+
+    then:
+      - delay: 15min
+
+      - if:
+          condition:
+            lambda: |-
+              return !id(printer_backlight_active);
+
+          then:
+            - light.turn_on:
+                id: backlight
+                brightness: 25%
+
+
+  # -------------------------------------------------------
+  # SIX-HOUR POST-PRINT BACKLIGHT HOLD
+  #
+  # Complete/cancelled starts this once per job. It
+  # deliberately continues through ready/idle transitions.
+  # -------------------------------------------------------
+
+  - id: post_print_backlight_hold
+    mode: restart
+
+    then:
+      - delay: 6h
+
+      - lambda: |-
+          id(printer_backlight_active) = false;
+
+      # If a recent touch is keeping the display awake,
+      # let the 15-minute wake timer control when it dims.
+      - if:
+          condition:
+            not:
+              script.is_running: touch_wake_timeout
+
+          then:
+            - light.turn_on:
+                id: backlight
+                brightness: 25%
+
+
+  # -------------------------------------------------------
+  # BACKLIGHT HELPERS
+  # -------------------------------------------------------
+
+  - id: backlight_full
+    then:
+      - lambda: |-
+          id(printer_backlight_active) = true;
+
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
+
+
+  # Inactive. Do not immediately dim if a recent touch is
+  # currently keeping the display awake.
+  - id: backlight_inactive
+    then:
+      - lambda: |-
+          id(printer_backlight_active) = false;
+
+      - if:
+          condition:
+            not:
+              script.is_running: touch_wake_timeout
+
+          then:
+            - light.turn_on:
+                id: backlight
+                brightness: 25%
+
+
+  # -------------------------------------------------------
+  # UPDATE BACKLIGHT FROM PRINTER STATE
+  #
+  # 100% while printing, paused or preparing.
+  # 100% for 6 hours after complete/cancelled.
+  # 25% otherwise.
+  # -------------------------------------------------------
+
+  - id: update_backlight_state
+    mode: restart
+
+    then:
+
+      - if:
+          condition:
+            lambda: |-
+              const std::string &s = id(printer_state).state;
+
+              return
+                s == "printing" ||
+                s == "paused" ||
+                s == "preparing";
+
+          then:
+            - script.stop: post_print_backlight_hold
+            - script.stop: touch_wake_timeout
+
+            # A new active print resets the post-print latch.
+            - lambda: |-
+                id(post_print_hold_latched) = false;
+
+            - script.execute: backlight_full
+
+          else:
+
+            - if:
+                condition:
+                  lambda: |-
+                    const std::string &s = id(printer_state).state;
+
+                    return
+                      s == "complete" ||
+                      s == "cancelled";
+
+                then:
+
+                  - if:
+                      condition:
+                        lambda: |-
+                          return !id(post_print_hold_latched);
+
+                      # First observation of this finished job.
+                      then:
+                        - script.stop: touch_wake_timeout
+
+                        - lambda: |-
+                            id(post_print_hold_latched) = true;
+
+                        - script.execute: backlight_full
+
+                        - script.execute: post_print_backlight_hold
+
+                      # Already processed. Stay at 100% while the
+                      # hold runs, inactive once it has expired.
+                      else:
+                        - if:
+                            condition:
+                              script.is_running: post_print_backlight_hold
+
+                            then:
+                              - script.execute: backlight_full
+
+                            else:
+                              - script.execute: backlight_inactive
+
+                else:
+
+                  - if:
+                      condition:
+                        lambda: |-
+                          return id(printer_state).state == "error";
+
+                      # A real error ends any hold.
+                      then:
+                        - script.stop: post_print_backlight_hold
+
+                        - lambda: |-
+                            id(post_print_hold_latched) = false;
+
+                        - script.execute: backlight_inactive
+
+                      # Ready / idle / offline / unknown. Preserve
+                      # a running six-hour hold.
+                      else:
+                        - if:
+                            condition:
+                              script.is_running: post_print_backlight_hold
+
+                            then:
+                              - script.stop: touch_wake_timeout
+                              - script.execute: backlight_full
+
+                            else:
+                              - script.execute: backlight_inactive
+
+
+  # -------------------------------------------------------
+  # UPDATE PRINTER UI
+  # -------------------------------------------------------
+
+  - id: update_printer_ui
+    mode: restart
+
+    then:
+
+      - script.execute: update_backlight_state
+
+      # Reset the print-removed acknowledgement.
+      - if:
+          condition:
+            lambda: |-
+              return id(printer_state).state != "complete";
+
+          then:
+            - lambda: |-
+                id(print_removed_acknowledged) = false;
+
+      # Any genuine state update cancels an existing
+      # cancelled-state timer.
+      - script.stop: cancelled_status_timeout
+
+
+      # Main status text + color
+
+      - lvgl.label.update:
+          id: printer_state_label
+
+          text: !lambda |-
+            const std::string &x = id(printer_state).state;
+
+            if (x == "printing")
+              return std::string("Printing");
+
+            if (x == "paused")
+              return std::string("Paused");
+
+            if (x == "complete") {
+
+              if (id(print_removed_acknowledged))
+                return std::string("Printer Ready");
+
+              return std::string("Print Complete");
+            }
+
+            if (x == "preparing")
+              return std::string("Preparing");
+
+            if (x == "cancelled")
+              return std::string("Cancelled");
+
+            if (x == "error")
+              return std::string("Error");
+
+            if (x == "ready")
+              return std::string("Printer Ready");
+
+            if (x == "offline")
+              return std::string("Offline");
+
+            if (x.empty() || x == "unknown")
+              return std::string("Unknown");
+
+            return x;
+
+          text_color: !lambda |-
+            const std::string &x = id(printer_state).state;
+
+            if (x == "printing")
+              return lv_color_hex(0x00D000);
+
+            if (x == "paused")
+              return lv_color_hex(0xFFC000);
+
+            if (x == "complete")
+              return lv_color_hex(0x00D000);
+
+            if (x == "preparing")
+              return lv_color_hex(0xFFC000);
+
+            if (x == "error")
+              return lv_color_hex(0xFF0000);
+
+            if (x == "cancelled")
+              return lv_color_hex(0x404040);
+
+            if (x == "ready")
+              return lv_color_hex(0x00D000);
+
+            if (x == "offline")
+              return lv_color_hex(0x404040);
+
+            return lv_color_hex(0xFFFFFF);
+
+
+      # Cancelled -> ready timer
+
+      - if:
+          condition:
+            lambda: |-
+              return id(printer_state).state == "cancelled";
+
+          then:
+            - script.execute: cancelled_status_timeout
+
+
+      # Print information visibility
+
+      - if:
+          condition:
+            lambda: |-
+              const std::string &x = id(printer_state).state;
+              return x == "printing" || x == "paused";
+
+          then:
+            - lvgl.widget.show:
+                id: progress_bar
+
+            - lvgl.widget.show:
+                id: progress_label
+
+            - lvgl.widget.show:
+                id: time_left_title
+
+            - lvgl.widget.show:
+                id: time_left_label
+
+            # Only show the thumbnail once the current job's
+            # image has successfully downloaded.
+            - if:
+                condition:
+                  lambda: |-
+                    return id(thumbnail_ready);
+
+                then:
+                  - lvgl.widget.show:
+                      id: thumbnail_widget
+
+                else:
+                  - lvgl.widget.hide:
+                      id: thumbnail_widget
+
+          else:
+            - lvgl.widget.hide:
+                id: progress_bar
+
+            - lvgl.widget.hide:
+                id: progress_label
+
+            - lvgl.widget.hide:
+                id: time_left_title
+
+            - lvgl.widget.hide:
+                id: time_left_label
+
+            - lvgl.widget.hide:
+                id: thumbnail_widget
+
+
+      # Main page action button
+      #
+      #   printing / paused:  CONTROL
+      #   complete:           PRINT REMOVED
+      #   everything else:    none
+
+      - if:
+          condition:
+            lambda: |-
+              return id(printer_state).state == "complete" &&
+                     !id(print_removed_acknowledged);
+
+          then:
+            - lvgl.widget.hide:
+                id: control_page_button
+
+            - lvgl.widget.show:
+                id: print_removed_button
+
+          else:
+            - if:
+                condition:
+                  lambda: |-
+                    const std::string &x = id(printer_state).state;
+                    return x == "printing" || x == "paused";
+
+                then:
+                  - lvgl.widget.hide:
+                      id: print_removed_button
+
+                  - lvgl.widget.show:
+                      id: control_page_button
+
+                else:
+                  - lvgl.widget.hide:
+                      id: print_removed_button
+
+                  - lvgl.widget.hide:
+                      id: control_page_button
+
+
+      # Print control button visibility
+
+      - if:
+          condition:
+            lambda: |-
+              return id(printer_state).state == "printing";
+
+          then:
+            - lvgl.widget.show:
+                id: pause_print_button
+
+            - lvgl.widget.hide:
+                id: resume_print_button
+
+            - lvgl.widget.show:
+                id: stop_print_button
+
+      - if:
+          condition:
+            lambda: |-
+              return id(printer_state).state == "paused";
+
+          then:
+            - lvgl.widget.hide:
+                id: pause_print_button
+
+            - lvgl.widget.show:
+                id: resume_print_button
+
+            - lvgl.widget.show:
+                id: stop_print_button
+
+      - if:
+          condition:
+            lambda: |-
+              const std::string &x = id(printer_state).state;
+              return x != "printing" && x != "paused";
+
+          then:
+            - lvgl.widget.hide:
+                id: pause_print_button
+
+            - lvgl.widget.hide:
+                id: resume_print_button
+
+            - lvgl.widget.hide:
+                id: stop_print_button
+
+
+  # -------------------------------------------------------
+  # PRINT PROGRESS (0-100)
+  # -------------------------------------------------------
+
+  - id: ui_set_progress
+    mode: restart
+    parameters:
+      value: float
+
+    then:
+      - lvgl.bar.update:
+          id: progress_bar
+
+          value: !lambda |-
+            if (isnan(value))
+              return 0;
+
+            if (value < 0)
+              return 0;
+
+            if (value > 100)
+              return 100;
+
+            return value;
+
+      - lvgl.label.update:
+          id: progress_label
+
+          text: !lambda |-
+            if (isnan(value))
+              return std::string("--%");
+
+            char buf[12];
+
+            snprintf(buf, sizeof(buf), "%.0f%%", value);
+
+            return std::string(buf);
+
+
+  # -------------------------------------------------------
+  # PRINT TIME LEFT (minutes)
+  # -------------------------------------------------------
+
+  - id: ui_set_time_left
+    mode: restart
+    parameters:
+      minutes: float
+
+    then:
+      - lvgl.label.update:
+          id: time_left_label
+
+          text: !lambda |-
+            if (isnan(minutes) || minutes <= 0)
+              return std::string("--");
+
+            int total_minutes = (int) round(minutes);
+
+            int hours = total_minutes / 60;
+            int mins = total_minutes % 60;
+
+            char buf[24];
+
+            if (hours > 0)
+              snprintf(buf, sizeof(buf), "%dh %02dm", hours, mins);
+            else
+              snprintf(buf, sizeof(buf), "%dm", mins);
+
+            return std::string(buf);
+
+
+# =========================================================
+# LVGL PAGES
+# =========================================================
+
+lvgl:
+
+  pages:
+
+    # =====================================================
+    # MAIN PAGE
+    # =====================================================
+
+    - id: main_page
+
+      bg_color: 0x000000
+      bg_opa: COVER
+
+      widgets:
+
+        # Printer title
+        - label:
+            align: TOP_LEFT
+            x: 12
+            y: 8
+
+            text: "${printer_title}"
+
+            text_color: 0x404040
+            text_font: font_small
+
+        # Printer status
+        - label:
+            id: printer_state_label
+
+            align: TOP_LEFT
+            x: 12
+            y: 34
+
+            text: "Loading..."
+
+            text_color: 0xFFFFFF
+            text_font: font_medium
+
+        # Print thumbnail
+        - image:
+            id: thumbnail_widget
+
+            src: thumbnail_image
+
+            align: TOP_RIGHT
+            x: -8
+            y: 38
+
+            hidden: true
+
+        # Progress bar
+        - bar:
+            id: progress_bar
+
+            align: TOP_LEFT
+            x: 12
+            y: 82
+
+            width: 178
+            height: 12
+
+            min_value: 0
+            max_value: 100
+            value: 0
+
+            bg_color: 0x404040
+            bg_opa: COVER
+            radius: 3
+
+            indicator:
+              bg_color: 0x001FFF
+              bg_opa: COVER
+              radius: 3
+
+            hidden: true
+
+        # Progress percentage
+        - label:
+            id: progress_label
+
+            align: TOP_LEFT
+            x: 12
+            y: 102
+
+            text: "--%"
+
+            text_color: 0x001FFF
+            text_font: font_medium
+
+            hidden: true
+
+        # Time left title
+        - label:
+            id: time_left_title
+
+            align: TOP_LEFT
+            x: 12
+            y: 145
+
+            text: "TIME LEFT"
+
+            text_color: 0x404040
+            text_font: font_small
+
+            hidden: true
+
+        # Time left value
+        - label:
+            id: time_left_label
+
+            align: TOP_LEFT
+            x: 12
+            y: 166
+
+            text: "--"
+
+            text_color: 0xFFFFFF
+            text_font: font_large
+
+            hidden: true
+
+        # Control button
+        - button:
+            id: control_page_button
+
+            align: BOTTOM_RIGHT
+            x: -8
+            y: -8
+
+            width: 88
+            height: 32
+
+            bg_color: 0x202020
+            bg_opa: COVER
+
+            border_width: 1
+            border_color: 0x404040
+
+            radius: 5
+
+            hidden: true
+
+            on_click:
+              then:
+                - script.execute: control_page_timeout
+
+                - lvgl.page.show:
+                    id: control_page
+                    animation: MOVE_LEFT
+                    time: 200ms
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "CONTROL"
+                  text_color: 0xFFFFFF
+                  text_font: font_small
+
+        # Print removed button
+        - button:
+            id: print_removed_button
+
+            align: BOTTOM_RIGHT
+            x: -8
+            y: -8
+
+            width: 120
+            height: 32
+
+            bg_color: 0x202020
+            bg_opa: COVER
+
+            border_width: 1
+            border_color: 0x00D000
+
+            radius: 5
+
+            hidden: true
+
+            on_click:
+              then:
+                - lambda: |-
+                    id(print_removed_acknowledged) = true;
+
+                - lvgl.label.update:
+                    id: printer_state_label
+                    text: "Printer Ready"
+                    text_color: 0x00D000
+
+                - lvgl.widget.hide:
+                    id: print_removed_button
+
+                - lvgl.widget.hide:
+                    id: control_page_button
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "PRINT REMOVED"
+                  text_color: 0xFFFFFF
+                  text_font: font_small
+
+
+    # =====================================================
+    # CONTROL PAGE
+    # =====================================================
+
+    - id: control_page
+
+      bg_color: 0x000000
+      bg_opa: COVER
+
+      widgets:
+
+        - label:
+            align: TOP_MID
+            y: 15
+
+            text: "PRINT CONTROL"
+
+            text_color: 0x404040
+            text_font: font_small
+
+        # Pause
+        - button:
+            id: pause_print_button
+
+            align: TOP_MID
+            y: 55
+
+            width: 180
+            height: 55
+
+            bg_color: 0xFFC000
+            bg_opa: COVER
+
+            radius: 6
+
+            hidden: true
+
+            on_click:
+              then:
+                - homeassistant.action:
+                    action: button.press
+                    data:
+                      entity_id: ${pause_entity}
+
+                - script.execute: control_action_return
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "PAUSE"
+                  text_color: 0x000000
+                  text_font: font_medium
+
+        # Continue / resume
+        - button:
+            id: resume_print_button
+
+            align: TOP_MID
+            y: 55
+
+            width: 180
+            height: 55
+
+            bg_color: 0x00D000
+            bg_opa: COVER
+
+            radius: 6
+
+            hidden: true
+
+            on_click:
+              then:
+                - homeassistant.action:
+                    action: button.press
+                    data:
+                      entity_id: ${resume_entity}
+
+                - script.execute: control_action_return
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "CONTINUE"
+                  text_color: 0x000000
+                  text_font: font_medium
+
+        # Stop
+        - button:
+            id: stop_print_button
+
+            align: TOP_MID
+            y: 125
+
+            width: 180
+            height: 55
+
+            bg_color: 0xFF0000
+            bg_opa: COVER
+
+            radius: 6
+
+            hidden: true
+
+            on_click:
+              then:
+                - script.execute: control_page_timeout
+
+                - lvgl.page.show:
+                    id: stop_confirm_page
+                    animation: MOVE_LEFT
+                    time: 200ms
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "STOP"
+                  text_color: 0xFFFFFF
+                  text_font: font_medium
+
+        # Back
+        - button:
+            id: back_to_main_button
+
+            align: BOTTOM_LEFT
+            x: 8
+            y: -8
+
+            width: 72
+            height: 32
+
+            bg_color: 0x202020
+            bg_opa: COVER
+
+            border_width: 1
+            border_color: 0x404040
+
+            radius: 5
+
+            on_click:
+              then:
+                - script.stop: control_page_timeout
+
+                - lvgl.page.show:
+                    id: main_page
+                    animation: MOVE_RIGHT
+                    time: 200ms
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "BACK"
+                  text_color: 0xFFFFFF
+                  text_font: font_small
+
+
+    # =====================================================
+    # STOP CONFIRMATION PAGE
+    # =====================================================
+
+    - id: stop_confirm_page
+
+      bg_color: 0x000000
+      bg_opa: COVER
+
+      widgets:
+
+        - label:
+            align: TOP_MID
+            y: 28
+
+            text: "STOP PRINT?"
+
+            text_color: 0xFF0000
+            text_font: font_large
+
+        - label:
+            align: TOP_MID
+            y: 70
+
+            text: "This will cancel the print."
+
+            text_color: 0x404040
+            text_font: font_small
+
+        # Confirm stop
+        - button:
+            id: confirm_stop_button
+
+            align: TOP_MID
+            y: 110
+
+            width: 200
+            height: 52
+
+            bg_color: 0xFF0000
+            bg_opa: COVER
+
+            radius: 6
+
+            on_click:
+              then:
+                - homeassistant.action:
+                    action: button.press
+                    data:
+                      entity_id: ${stop_entity}
+
+                - script.execute: control_action_return
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "YES - STOP PRINT"
+                  text_color: 0xFFFFFF
+                  text_font: font_medium
+
+        # Never mind
+        - button:
+            id: cancel_stop_button
+
+            align: BOTTOM_MID
+            y: -18
+
+            width: 150
+            height: 38
+
+            bg_color: 0x202020
+            bg_opa: COVER
+
+            border_width: 1
+            border_color: 0x404040
+
+            radius: 5
+
+            on_click:
+              then:
+                - script.execute: control_page_timeout
+
+                - lvgl.page.show:
+                    id: control_page
+                    animation: MOVE_RIGHT
+                    time: 200ms
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "NEVER MIND"
+                  text_color: 0xFFFFFF
+                  text_font: font_small

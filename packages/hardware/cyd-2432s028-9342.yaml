@@ -1,0 +1,129 @@
+# =========================================================
+# HARDWARE: ESP32-2432S028-9342
+#
+# Display profile B:
+#   ILI9341 initialization
+#   + ESP32-2432S028-9342 gamma override
+#
+# Touch calibration varies slightly per unit. Override the
+# touch_* substitutions in the device file if needed.
+# =========================================================
+
+substitutions:
+  touch_x_min: "323"
+  touch_x_max: "3754"
+  touch_y_min: "232"
+  touch_y_max: "3724"
+  display_rotation: "180"
+
+
+spi:
+
+  # Display
+  - id: disp_spi
+    clk_pin: GPIO14
+    mosi_pin: GPIO13
+
+  # XPT2046 touchscreen
+  - id: touch_spi
+    clk_pin: GPIO25
+    mosi_pin: GPIO32
+    miso_pin: GPIO39
+
+
+output:
+  - platform: ledc
+    id: backlight_pwm
+    pin: GPIO21
+    frequency: 44100 Hz
+
+
+light:
+  - platform: monochromatic
+    id: backlight
+    name: "CYD Backlight"
+    output: backlight_pwm
+    restore_mode: ALWAYS_ON
+
+
+display:
+
+  - platform: mipi_spi
+    id: cyd_display
+    spi_id: disp_spi
+
+    model: ILI9341
+
+    cs_pin:
+      number: 15
+      ignore_strapping_warning: true
+
+    dc_pin:
+      number: 2
+      ignore_strapping_warning: true
+
+    data_rate: 40MHz
+
+    color_order: RGB
+    invert_colors: false
+
+    dimensions:
+      width: 320
+      height: 240
+      offset_width: 0
+      offset_height: 0
+      pad_width: 0
+      pad_height: 0
+
+    # ESP32-2432S028-9342 gamma profile
+    init_sequence:
+
+      - [
+          0xE0,
+          0x00, 0x0C, 0x11, 0x04, 0x11,
+          0x08, 0x37, 0x89, 0x4C, 0x06,
+          0x0C, 0x0A, 0x2E, 0x34, 0x0F
+        ]
+
+      - [
+          0xE1,
+          0x00, 0x0B, 0x11, 0x05, 0x13,
+          0x09, 0x33, 0x67, 0x48, 0x07,
+          0x0E, 0x0B, 0x23, 0x33, 0x0F
+        ]
+
+
+touchscreen:
+
+  - platform: xpt2046
+    id: cyd_touch
+    spi_id: touch_spi
+
+    cs_pin: GPIO33
+    interrupt_pin: GPIO36
+
+    update_interval: 50ms
+    threshold: 400
+
+    calibration:
+      x_min: ${touch_x_min}
+      x_max: ${touch_x_max}
+      y_min: ${touch_y_min}
+      y_max: ${touch_y_max}
+
+    transform:
+      swap_xy: true
+      mirror_x: true
+      mirror_y: true
+
+
+lvgl:
+
+  displays:
+    - cyd_display
+
+  touchscreens:
+    - cyd_touch
+
+  # Known-good orientation for the 9342 board.
+  rotation: ${display_rotation}

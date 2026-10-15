@@ -1,0 +1,36 @@
+# =========================================================
+# Creality K2+ status display
+#
+# Paste this into a new device in the ESPHome dashboard,
+# edit the substitutions below, and install. Everything
+# else is pulled from GitHub at the pinned release tag.
+# See README.md for where each value comes from.
+# =========================================================
+
+substitutions:
+  device_name: creality-k2-plus-display
+  friendly_name: Creality K2+ Display
+  printer_title: Creality K2+
+
+  # Prefix of this printer's Home Assistant entities.
+  # Example: sensor.k2_plus_progress -> entity_prefix: k2_plus
+  entity_prefix: k2_plus
+
+  # Moonraker address. Give the printer a DHCP reservation
+  # so this never changes.
+  moonraker_url: http://192.168.1.51:7125
+
+  # Must match a PNG thumbnail size your slicer embeds.
+  # thumb_size: "96x96"
+
+  # Secrets live in your ESPHome secrets.yaml.
+  # Use a different API key for each display.
+  api_encryption_key: !secret k2_plus_api_key
+  wifi_ssid: !secret wifi_ssid
+  wifi_password: !secret wifi_password
+
+packages:
+  base: github://jsheheane/CYD-3d-Printer-Status/packages/base.yaml@v1.0.0
+  hardware: github://jsheheane/CYD-3d-Printer-Status/packages/hardware/cyd-2432s028-9342.yaml@v1.0.0
+  ui: github://jsheheane/CYD-3d-Printer-Status/packages/ui.yaml@v1.0.0
+  backend: github://jsheheane/CYD-3d-Printer-Status/packages/backends/moonraker.yaml@v1.0.0
