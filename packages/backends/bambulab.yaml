@@ -16,7 +16,9 @@
 #       gives us the image revision timestamp
 #
 #   A change to the revision timestamp triggers
-#   downloading a fresh thumbnail.
+#   downloading a fresh thumbnail. If a print becomes
+#   active without one (same file reprinted), the
+#   current cover is fetched instead.
 # =========================================================
 
 substitutions:
@@ -135,6 +137,80 @@ script:
             return x;
 
 
+  # -------------------------------------------------------
+  # FETCH COVER IMAGE
+  #
+  # Builds the URL from the CURRENT entity_picture. Home
+  # Assistant rotates the access token in that URL every
+  # few minutes, so a URL saved earlier can be rejected.
+  # Does nothing until both cover entities have values.
+  # -------------------------------------------------------
+
+  - id: bambu_fetch_cover
+
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const std::string &rev =
+                id(bambu_cover_state).state;
+
+              const std::string &picture =
+                id(bambu_cover_picture).state;
+
+              return
+                !rev.empty() &&
+                rev != "unknown" &&
+                rev != "unavailable" &&
+                !picture.empty() &&
+                picture != "unknown" &&
+                picture != "unavailable";
+
+          then:
+
+            # The previous image is no longer valid.
+            - lambda: |-
+                id(thumbnail_ready) = false;
+
+            - lvgl.widget.hide:
+                id: thumbnail_widget
+
+            # entity_picture can keep the same HA proxy
+            # path even when the image bytes change.
+            # Append the revision timestamp as a
+            # cache-busting query parameter.
+            - online_image.set_url:
+                id: thumbnail_image
+
+                url: !lambda |-
+                  std::string path =
+                    id(bambu_cover_picture).state;
+
+                  std::string url;
+
+                  // Absolute URL already supplied.
+                  if (
+                    path.rfind("http://", 0) == 0 ||
+                    path.rfind("https://", 0) == 0
+                  ) {
+                    url = path;
+                  }
+
+                  // Normal HA relative entity_picture URL.
+                  else {
+                    url = std::string("${ha_base_url}") + path;
+                  }
+
+                  if (url.find('?') == std::string::npos)
+                    url += "?state=";
+                  else
+                    url += "&state=";
+
+                  url += id(bambu_cover_state).state;
+
+                  return url;
+
+
 # =========================================================
 # HOME ASSISTANT TEXT SENSORS
 # =========================================================
@@ -177,6 +253,27 @@ text_sensor:
                   id: thumbnail_widget
 
               - online_image.release: thumbnail_image
+
+        # Fallback for a job with no fresh cover. Reprinting
+        # the same file may not change the cover revision, and
+        # a revision that arrived before "prepare" was released
+        # above. Re-fetch the current cover once the print is
+        # active. A later revision change still replaces it.
+
+        - if:
+            condition:
+              lambda: |-
+                return
+                  (x == "running" || x == "pause") &&
+                  !id(thumbnail_ready);
+
+            then:
+              - logger.log:
+                  level: INFO
+                  tag: thumbnail
+                  format: "Bambu print active without cover - fetching current cover"
+
+              - script.execute: bambu_fetch_cover
 
         - script.execute: bambu_publish_state
 
@@ -229,60 +326,7 @@ text_sensor:
               # entity_picture and the corresponding image.
               - delay: 1s
 
-              - if:
-                  condition:
-                    lambda: |-
-                      const std::string &picture =
-                        id(bambu_cover_picture).state;
-
-                      return
-                        !picture.empty() &&
-                        picture != "unknown" &&
-                        picture != "unavailable";
-
-                  then:
-
-                    # The previous image is no longer valid.
-                    - lambda: |-
-                        id(thumbnail_ready) = false;
-
-                    - lvgl.widget.hide:
-                        id: thumbnail_widget
-
-                    # entity_picture can keep the same HA proxy
-                    # path even when the image bytes change.
-                    # Append the revision timestamp as a
-                    # cache-busting query parameter.
-                    - online_image.set_url:
-                        id: thumbnail_image
-
-                        url: !lambda |-
-                          std::string path =
-                            id(bambu_cover_picture).state;
-
-                          std::string url;
-
-                          // Absolute URL already supplied.
-                          if (
-                            path.rfind("http://", 0) == 0 ||
-                            path.rfind("https://", 0) == 0
-                          ) {
-                            url = path;
-                          }
-
-                          // Normal HA relative entity_picture URL.
-                          else {
-                            url = std::string("${ha_base_url}") + path;
-                          }
-
-                          if (url.find('?') == std::string::npos)
-                            url += "?state=";
-                          else
-                            url += "&state=";
-
-                          url += id(bambu_cover_state).state;
-
-                          return url;
+              - script.execute: bambu_fetch_cover
 
 
 # =========================================================

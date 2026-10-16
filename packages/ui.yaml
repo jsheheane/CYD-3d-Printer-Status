@@ -273,6 +273,7 @@ script:
   # UPDATE BACKLIGHT FROM PRINTER STATE
   #
   # 100% while printing, paused or preparing.
+  # 100% while the printer reports an error.
   # 100% for 6 hours after complete/cancelled.
   # 25% otherwise.
   # -------------------------------------------------------
@@ -351,14 +352,17 @@ script:
                         lambda: |-
                           return id(printer_state).state == "error";
 
-                      # A real error ends any hold.
+                      # A real error ends any hold and stays at
+                      # 100% so it is noticed. Leaving the error
+                      # state falls through to the rules below.
                       then:
                         - script.stop: post_print_backlight_hold
+                        - script.stop: touch_wake_timeout
 
                         - lambda: |-
                             id(post_print_hold_latched) = false;
 
-                        - script.execute: backlight_inactive
+                        - script.execute: backlight_full
 
                       # Ready / idle / offline / unknown. Preserve
                       # a running six-hour hold.
@@ -386,11 +390,19 @@ script:
 
       - script.execute: update_backlight_state
 
-      # Reset the print-removed acknowledgement.
+      # Reset the print-removed acknowledgement only when a
+      # new print becomes active. A brief unknown/offline
+      # blip (Home Assistant restart, integration reload)
+      # must not bring back "Print Complete".
       - if:
           condition:
             lambda: |-
-              return id(printer_state).state != "complete";
+              const std::string &x = id(printer_state).state;
+
+              return
+                x == "printing" ||
+                x == "paused" ||
+                x == "preparing";
 
           then:
             - lambda: |-

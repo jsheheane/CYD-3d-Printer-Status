@@ -29,6 +29,7 @@ Any Klipper/Moonraker printer should work with the Moonraker device file. Any pr
 Backlight behavior:
 
 - 100% while printing, paused or preparing.
+- 100% while the printer reports an error, so it gets noticed.
 - 100% for 6 hours after a print completes or is cancelled, then 25%.
 - 25% when idle. Touching the screen wakes it to 100% for 15 minutes.
 
@@ -60,10 +61,10 @@ Device files pull the packages straight from this repository with `github://` re
 
 ```yaml
 packages:
-  ui: github://jsheheane/CYD-3d-Printer-Status/packages/ui.yaml@v1.0.0
+  ui: github://jsheheane/CYD-3d-Printer-Status/packages/ui.yaml@v1.1.0
 ```
 
-To update, change `@v1.0.0` to a newer tag on all four lines and install again. Your ESPHome host needs internet access to download the packages.
+To update, change `@v1.1.0` to a newer tag on all four lines and install again. Your ESPHome host needs internet access to download the packages.
 
 Validated with ESPHome 2026.9.1.
 
@@ -206,8 +207,6 @@ The display shows the small PNG thumbnail that your slicer embeds in the G-code.
 
 Larger thumbnails are not used because the CYD has very little memory.
 
-Known limitation: thumbnails may not load for file names that contain spaces or other special characters.
-
 ### 7. Install
 
 The first install must be over USB. Flash each board before assembling the case.
@@ -230,7 +229,7 @@ After the first install, updates go over Wi-Fi: click **Install** and choose **W
 | Symptom | Check |
 |---|---|
 | Screen shows "Unknown" | `entity_prefix` (step 2). Open the display's logs in the ESPHome dashboard for entity errors |
-| Progress shows, no thumbnail (Moonraker) | Slicer thumbnail size (step 6), `moonraker_url`, file name characters |
+| Progress shows, no thumbnail (Moonraker) | Slicer thumbnail size (step 6), `moonraker_url` |
 | No thumbnail (Bambu) | `ha_base_url` is the local `http://` address, cover image entity enabled |
 | Buttons do nothing | Home Assistant actions allowed (step 8) |
 | Install fails downloading packages | The ESPHome host needs internet access to github.com |

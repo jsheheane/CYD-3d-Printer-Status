@@ -30,7 +30,7 @@ substitutions:
   wifi_password: !secret wifi_password
 
 packages:
-  base: github://jsheheane/CYD-3d-Printer-Status/packages/base.yaml@v1.0.0
-  hardware: github://jsheheane/CYD-3d-Printer-Status/packages/hardware/cyd-2432s028-9342.yaml@v1.0.0
-  ui: github://jsheheane/CYD-3d-Printer-Status/packages/ui.yaml@v1.0.0
-  backend: github://jsheheane/CYD-3d-Printer-Status/packages/backends/moonraker.yaml@v1.0.0
+  base: github://jsheheane/CYD-3d-Printer-Status/packages/base.yaml@v1.1.0
+  hardware: github://jsheheane/CYD-3d-Printer-Status/packages/hardware/cyd-2432s028-9342.yaml@v1.1.0
+  ui: github://jsheheane/CYD-3d-Printer-Status/packages/ui.yaml@v1.1.0
+  backend: github://jsheheane/CYD-3d-Printer-Status/packages/backends/moonraker.yaml@v1.1.0
